@@ -48,6 +48,14 @@ def test_cshape_electromagnet_physics():
     assert rmse > 0.0
     print(f"\n[+] CShapeElectromagnet verified! Init Design RMSE: {rmse:.4f}")
 
+
+def test_cshape_odd_coil_sample_count():
+    pde = CShapeElectromagnet(device=torch.device("cpu"))
+    points, currents = pde.sample_coils(11)
+    assert points.shape == (11, 2)
+    assert currents.shape == (11, 1)
+
+
 def test_meissner_cylinder_analytical():
     pde = MeissnerCylinder(r0=1.0, r_outer=4.0, b0=1.0, device=torch.device("cpu"))
     

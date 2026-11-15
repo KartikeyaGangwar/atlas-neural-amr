@@ -1,7 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
 from typing import Optional, List, Tuple, Dict, Union
 
 
@@ -87,16 +85,20 @@ class AdaptiveSubspacePINN(nn.Module):
         self.layers = layers
         self.activation = activation
         
-        # Dimension-Normalized Anisotropic Bandwidth Vector
+        if initial_subspaces < 1 and initial_centroids is None:
+            raise ValueError("initial_subspaces must be at least 1")
+
+        # Dimension-Normalized Anisotropic Bandwidth Vectors
         if isinstance(bandwidth, (int, float)):
-            bw_tensor = torch.full((1, in_dim), float(bandwidth), dtype=torch.float32)
+            bw_vector = torch.full((in_dim,), float(bandwidth), dtype=torch.float32)
         elif isinstance(bandwidth, (list, tuple)):
-            bw_tensor = torch.tensor(bandwidth, dtype=torch.float32).reshape(1, in_dim)
+            bw_vector = torch.tensor(bandwidth, dtype=torch.float32).reshape(in_dim)
         elif isinstance(bandwidth, torch.Tensor):
-            bw_tensor = bandwidth.clone().detach().to(dtype=torch.float32).reshape(1, in_dim)
+            bw_vector = bandwidth.clone().detach().to(dtype=torch.float32).reshape(in_dim)
         else:
-            bw_tensor = torch.full((1, in_dim), 0.50, dtype=torch.float32)
-        self.register_buffer("bandwidth", bw_tensor)
+            raise TypeError("bandwidth must be a scalar, sequence, or torch.Tensor")
+        if not torch.isfinite(bw_vector).all() or (bw_vector <= 0).any():
+            raise ValueError("bandwidth values must be finite and strictly positive")
         
         # Initial Centroids
         if initial_centroids is not None:
@@ -105,6 +107,9 @@ class AdaptiveSubspacePINN(nn.Module):
         else:
             centroids_t = torch.zeros((initial_subspaces, in_dim), dtype=torch.float32)
             N = initial_subspaces
+        if N < 1:
+            raise ValueError("initial_centroids must contain at least one centroid")
+        self.register_buffer("bandwidth", bw_vector.repeat(N, 1))
             
         self.register_buffer("centroids", centroids_t)
         
@@ -123,7 +128,7 @@ class AdaptiveSubspacePINN(nn.Module):
         Computes Symmetric Voronoi Partition of Unity weights psi_k(x) for all k in 1..N.
         Guarantees sum_{k=1}^N psi_k(x) = 1.0 everywhere with smooth Gaussian decay.
         """
-        # x: [B, in_dim], centroids: [N, in_dim], bandwidth: [1, in_dim]
+        # x: [B, in_dim], centroids/bandwidth: [N, in_dim]
         diff = (x.unsqueeze(1) - self.centroids.unsqueeze(0)) / self.bandwidth.unsqueeze(0) # [B, N, in_dim]
         dist_sq = torch.sum(diff ** 2, dim=-1) # [B, N]
         logits = -0.5 * dist_sq
@@ -139,7 +144,7 @@ class AdaptiveSubspacePINN(nn.Module):
         
         for k in range(self.num_subspaces):
             # Centered normalized local coordinate
-            x_local = (x - self.centroids[k:k+1]) / self.bandwidth
+            x_local = (x - self.centroids[k:k+1]) / self.bandwidth[k:k+1]
             u_k = self.subspaces[k](x_local) # [B, out_dim]
             u_global = u_global + psi[:, k:k+1] * u_k
             
@@ -147,7 +152,7 @@ class AdaptiveSubspacePINN(nn.Module):
 
     def forward_subspace(self, subspace_idx: int, x: torch.Tensor) -> torch.Tensor:
         """Evaluates an isolated subspace Phi_k((x - c_k)/sigma)."""
-        x_local = (x - self.centroids[subspace_idx:subspace_idx+1]) / self.bandwidth
+        x_local = (x - self.centroids[subspace_idx:subspace_idx+1]) / self.bandwidth[subspace_idx:subspace_idx+1]
         return self.subspaces[subspace_idx](x_local)
 
     def spawn_new_subspace(
@@ -163,15 +168,20 @@ class AdaptiveSubspacePINN(nn.Module):
         device = self.centroids.device
         dtype = self.centroids.dtype
         centroid = centroid.to(device=device, dtype=dtype).reshape(1, self.in_dim)
+        if not torch.isfinite(centroid).all():
+            raise ValueError("centroid must contain only finite values")
         
         if bandwidth is not None:
             if isinstance(bandwidth, (int, float)):
-                bw_tensor = torch.full((1, self.in_dim), float(bandwidth), device=device, dtype=dtype)
+                bw_vector = torch.full((self.in_dim,), float(bandwidth), device=device, dtype=dtype)
             elif isinstance(bandwidth, (list, tuple)):
-                bw_tensor = torch.tensor(bandwidth, device=device, dtype=dtype).reshape(1, self.in_dim)
+                bw_vector = torch.tensor(bandwidth, device=device, dtype=dtype).reshape(self.in_dim)
             else:
-                bw_tensor = bandwidth.clone().detach().to(device=device, dtype=dtype).reshape(1, self.in_dim)
-            self.register_buffer("bandwidth", bw_tensor)
+                bw_vector = bandwidth.clone().detach().to(device=device, dtype=dtype).reshape(self.in_dim)
+            if not torch.isfinite(bw_vector).all() or (bw_vector <= 0).any():
+                raise ValueError("bandwidth values must be finite and strictly positive")
+        else:
+            bw_vector = self.bandwidth[-1].clone()
             
         # Instantiate new SubspaceMLP
         new_mlp = SubspaceMLP(
@@ -189,7 +199,11 @@ class AdaptiveSubspacePINN(nn.Module):
         
         # Append centroid
         updated_centroids = torch.cat([self.centroids, centroid], dim=0)
+        updated_bandwidth = torch.cat(
+            [self.bandwidth, bw_vector.reshape(1, self.in_dim)], dim=0
+        )
         self.register_buffer("centroids", updated_centroids)
+        self.register_buffer("bandwidth", updated_bandwidth)
         
         new_idx = len(self.subspaces) - 1
         return new_idx
@@ -199,4 +213,3 @@ class AdaptiveSubspacePINN(nn.Module):
 ATLAS = AdaptiveSubspacePINN
 ASNN = AdaptiveSubspacePINN
 ASPINN = AdaptiveSubspacePINN
-

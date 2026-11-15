@@ -43,17 +43,24 @@ class HighDimDiffusion4D(BasePDE):
         Samples Dirichlet boundary points on all 8 faces of the 4D hypercube [-1, 1]^4.
         """
         # 8 faces (2 faces per spatial dimension i=0..3 at x_i = -1 and x_i = +1)
-        samples_per_face = max(1, n_samples // 8)
         boundary_pts = []
-        
+
+        face_counts = [n_samples // 8] * 8
+        for face_idx in range(n_samples % 8):
+            face_counts[face_idx] += 1
+        face_idx = 0
         for dim in range(4):
             for val in [-1.0, 1.0]:
-                x = torch.rand(samples_per_face, 4, device=self.device) * 2.0 - 1.0
+                count = face_counts[face_idx]
+                face_idx += 1
+                if count == 0:
+                    continue
+                x = torch.rand(count, 4, device=self.device) * 2.0 - 1.0
                 x[:, dim] = val
-                t = torch.rand(samples_per_face, 1, device=self.device)
+                t = torch.rand(count, 1, device=self.device)
                 boundary_pts.append(torch.cat([x, t], dim=1))
                 
-        x_bc = torch.cat(boundary_pts, dim=0)[:n_samples]
+        x_bc = torch.cat(boundary_pts, dim=0)
         u_bc = self.exact_solution(x_bc)
         return x_bc, u_bc
 

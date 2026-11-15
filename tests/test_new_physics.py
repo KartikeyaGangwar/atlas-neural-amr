@@ -49,9 +49,9 @@ class TestNewPhysicsSuite(unittest.TestCase):
         x_int = pde.sample_interior(100)
         self.assertEqual(x_int.shape, (100, 5))
         
-        x_bc, u_bc = pde.sample_boundary(64)
-        self.assertEqual(x_bc.shape, (64, 5))
-        self.assertEqual(u_bc.shape, (64, 1))
+        x_bc, u_bc = pde.sample_boundary(67)
+        self.assertEqual(x_bc.shape, (67, 5))
+        self.assertEqual(u_bc.shape, (67, 1))
         
         x_ic, u_ic = pde.sample_initial(64)
         self.assertEqual(x_ic.shape, (64, 5))

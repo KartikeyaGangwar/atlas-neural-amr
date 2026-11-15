@@ -64,16 +64,17 @@ class CShapeElectromagnet(BasePDE):
 
     def sample_coils(self, n_samples: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """Sample excitation current coil points."""
-        n_half = n_samples // 2
-        c1 = torch.empty(n_half, 2, device=self.device)
+        n_first = (n_samples + 1) // 2
+        n_second = n_samples - n_first
+        c1 = torch.empty(n_first, 2, device=self.device)
         c1[:, 0].uniform_(self.COIL1_BOX[0], self.COIL1_BOX[1])
         c1[:, 1].uniform_(self.COIL1_BOX[2], self.COIL1_BOX[3])
-        j1 = torch.full((n_half, 1), self.J_COIL1, device=self.device)
+        j1 = torch.full((n_first, 1), self.J_COIL1, device=self.device)
 
-        c2 = torch.empty(n_half, 2, device=self.device)
+        c2 = torch.empty(n_second, 2, device=self.device)
         c2[:, 0].uniform_(self.COIL2_BOX[0], self.COIL2_BOX[1])
         c2[:, 1].uniform_(self.COIL2_BOX[2], self.COIL2_BOX[3])
-        j2 = torch.full((n_half, 1), self.J_COIL2, device=self.device)
+        j2 = torch.full((n_second, 1), self.J_COIL2, device=self.device)
 
         pts = torch.cat([c1, c2], dim=0)
         currents = torch.cat([j1, j2], dim=0)

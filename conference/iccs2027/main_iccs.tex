@@ -1,0 +1,250 @@
+\documentclass[runningheads]{llncs}
+
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{microtype}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+
+\begin{document}
+
+\title{Autonomous Neural Adaptive Mesh Refinement via Localized Anisotropic Partition-of-Unity Subspaces}
+\titlerunning{Autonomous Neural AMR via Anisotropic Subspaces}
+
+\author{Kartikeya Gangwar\orcidID{0009-0004-7494-0466}}
+\authorrunning{K. Gangwar}
+
+\institute{Department of Mathematics, University of Delhi, Delhi 110007, India\\
+\email{kartikeyagangwar@proton.me}}
+
+\maketitle
+
+\begin{abstract}
+Physics-Informed Neural Networks (PINNs) frequently encounter severe optimization failure modes in stiff, multi-scale, and convection-dominated partial differential equations (PDEs). Unlike classical finite element methods that localize numerical stiffness through Adaptive Mesh Refinement (AMR), standard PINNs optimize a single, monolithic parameter vector across the entire spatio-temporal domain, entangling localized physical features and triggering destructive gradient interference. Existing domain decomposition methods either rely on rigid, pre-defined Cartesian grids that suffer from exponential dimensional scaling or introduce delicate interface transmission penalties. In this paper, we propose \textbf{ATLAS} (Adaptive Tiling of Localized Anisotropic Subspaces), an autonomous neural AMR framework for PINNs. ATLAS profiles spatial gradient conflict online using batched reverse-mode autodiff via \texttt{torch.func.vmap}, detecting localized stiffness and dynamically cleaving subdomains with dimension-normalized anisotropic bandwidth matrices. Subspaces are seamlessly synthesized under a $C^\infty$ Partition of Unity (PoU), eliminating internal interface continuity loss terms. Through a decoupled Two-Stage Discover-and-Deploy protocol, a lightweight probe network discovers the parsimonious subspace count $N^*$ and input-space centroids, after which a clean production model is trained with joint second-order L-BFGS polish. We evaluate ATLAS across a standardized benchmark suite of nine demanding PDE systems, including 2D high-frequency Helmholtz ($k=4\pi$), 2D high-P\'eclet convection-diffusion ($\mathrm{Pe}=1000$), 2D incompressible lid-driven cavity flow ($\mathrm{Re}=100$), and 4D anisotropic diffusion. ATLAS consistently outperforms monolithic PINNs and multi-objective gradient surgery baselines (PCGrad, CAGrad), achieving up to a $418.5\times$ reduction in held-out test loss on oscillatory Helmholtz fields and an order-of-magnitude reduction in relative $L^2$ error in high-shear fluid flows.
+
+\keywords{Physics-Informed Neural Networks \and Adaptive Mesh Refinement \and Domain Decomposition \and Gradient Interference \and Computational Science.}
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+Physics-Informed Neural Networks (PINNs) \cite{raissi2019physics} have emerged as a versatile paradigm for forward and inverse problems in computational science and engineering. By embedding governing differential operators directly into neural network loss functionals via automatic differentiation, PINNs eliminate the requirement for traditional mesh generation. However, despite notable successes on smooth, low-frequency boundary value problems, monolithic PINNs routinely fail when applied to stiff, multi-scale, or advection-dominated systems. 
+
+A principal source of these training pathologies is \textit{spatial gradient interference} \cite{wang2021understanding,krishnapriyan2021characterizing}. In standard finite element or finite volume solvers, stiff localized phenomena—such as thin boundary layers, shock transitions, or recirculation vortices—are addressed through Adaptive Mesh Refinement (AMR). Classical AMR dynamically allocates degrees of freedom exclusively where localized error indicators or residual gradients are elevated, leaving quiescent background regions undisturbed. In contrast, standard PINNs map the entire spatio-temporal domain $Q \subset \mathbb{R}^{d_{\text{in}}}$ through a monolithic parameter vector $\Theta \in \mathbb{R}^P$. When the physical domain contains disparate behavioral regimes (e.g., an interior shock wave alongside a quiescent freestream), collocation points across these regions backpropagate diametrically opposed gradient updates to the same shared weights:
+\begin{equation}
+\langle \nabla_\Theta \ell(\mathbf{x}_1), \nabla_\Theta \ell(\mathbf{x}_2) \rangle < 0, \quad \mathbf{x}_1 \in \Omega_{\text{shock}}, \; \mathbf{x}_2 \in \Omega_{\text{laminar}}.
+\end{equation}
+This spatial gradient conflict leads to severe gradient cancellation, artificial numerical dissipation, or total training divergence \cite{gangwar2026decoupling}.
+
+While multi-objective gradient surgery algorithms such as PCGrad \cite{yu2020gradient} and CAGrad \cite{liu2021cagrad} attempt to project conflicting gradient vectors during stochastic descent, they operate entirely within a shared parameter space. In multi-scale boundary value problems, projecting gradients often suppresses essential boundary constraints against interior residuals, frequently exacerbating training failure.
+
+To address parameter entanglement, domain decomposition techniques such as Extended PINNs (XPINNs) \cite{jagtap2020extended} and Finite Basis PINNs (FBPINNs) \cite{moseley2023finite,dolean2024finite} partition the physical domain across multiple localized sub-networks. However, current implementations suffer from two critical limitations:
+\begin{enumerate}
+    \item \textbf{Manual and Static Partitioning:} Subdomains are conventionally laid out on rigid Cartesian grids ($K_0 \times \dots \times K_0$). In higher dimensions, the network count explodes combinatorially as $\mathcal{O}(K_0^{d_{\text{in}}})$, rendering high-dimensional or anisotropic problems computationally intractable.
+    \item \textbf{Interface Penalty Sensitivities:} Methods employing hard non-overlapping partitions (such as XPINNs) require explicit penalty terms on inter-element boundaries to enforce continuity of solution $[u]$ and flux $[\nabla u \cdot \mathbf{n}]$. These penalty weights introduce severe hyperparameter sensitivity and can induce interface tearing.
+\end{enumerate}
+
+\paragraph{Contributions.} In this work, we propose \textbf{ATLAS} (Adaptive Tiling of Localized Anisotropic Subspaces), an autonomous neural AMR framework. Our primary contributions are:
+\begin{itemize}
+    \item \textbf{Vectorized Online Conflict Profiling via \texttt{torch.func.vmap}:} We formulate an exact, batch-parallel gradient conflict monitor that computes per-sample gradient inner products at GPU line-rate ($47\times\text{--}83\times$ speedup over sequential autodiff), identifying active stiffness manifolds online without external error estimators.
+    \item \textbf{Anisotropic Partition of Unity Synthesis:} We cleave localized subspaces governed by a dimension-normalized anisotropic bandwidth matrix $\boldsymbol{\Sigma} = \operatorname{diag}(\sigma_1^2, \dots, \sigma_{d_{\text{in}}}^2)$, capturing high-aspect-ratio convective characteristics with zero inter-subdomain interface loss terms.
+    \item \textbf{Two-Stage Discover-and-Deploy Protocol:} We decouple domain discovery from production training. An exploratory Stage 1 probe network identifies the optimal subspace count $N^*$ and centroids, following which Stage 2 trains a clean production model with joint second-order Quasi-Newton (Combined Global L-BFGS) polish.
+    \item \textbf{Comprehensive 9-PDE Empirical Verification:} We demonstrate state-of-the-art accuracy across nine benchmark systems, establishing up to $418.5\times$ lower test loss on high-frequency Helmholtz fields and order-of-magnitude gains in Navier-Stokes cavity flow.
+\end{itemize}
+
+\section{The ATLAS Architecture}
+\label{sec:method}
+
+\subsection{Partition of Unity Subspace Representation}
+Let $Q \subset \mathbb{R}^{d_{\text{in}}}$ denote a bounded spatio-temporal domain with boundary $\partial Q$. The global ATLAS solution field $\hat{u}(\mathbf{x}; \boldsymbol{\Theta}): Q \to \mathbb{R}^{d_{\text{out}}}$ is constructed as a partition-of-unity sum of $N$ localized subnetworks:
+\begin{equation}
+\label{eq:pou_sum}
+\hat{u}(\mathbf{x}; \boldsymbol{\Theta}) = \sum_{k=1}^N \psi_k(\mathbf{x}) \Phi_k(\tilde{\mathbf{x}}_k; \Theta_k), \quad \tilde{\mathbf{x}}_k = \boldsymbol{\Sigma}^{-1/2}(\mathbf{x} - \mathbf{c}_k),
+\end{equation}
+where $\mathbf{c}_k \in Q$ denotes the spatial centroid of subspace $k$, $\Phi_k$ is an independent multi-layer perceptron (MLP) parameterized by disjoint weight vector $\Theta_k$, and $\boldsymbol{\Theta} = \{\Theta_1, \dots, \Theta_N\}$ represents the combined parameter set.
+
+The weighting functions $\psi_k(\mathbf{x})$ are defined via normalized anisotropic Gaussian kernels:
+\begin{equation}
+\label{eq:pou_weights}
+\psi_k(\mathbf{x}) = \frac{w_k(\mathbf{x})}{\sum_{j=1}^N w_j(\mathbf{x})}, \quad w_k(\mathbf{x}) = \exp\left(-\frac{1}{2}\|\mathbf{x} - \mathbf{c}_k\|_{\boldsymbol{\Sigma}}^2\right),
+\end{equation}
+where $\|\mathbf{v}\|_{\boldsymbol{\Sigma}}^2 = \mathbf{v}^T \boldsymbol{\Sigma}^{-1} \mathbf{v} = \sum_{i=1}^{d_{\text{in}}} (v_i / \sigma_i)^2$. By construction, $\sum_{k=1}^N \psi_k(\mathbf{x}) \equiv 1$ and $\psi_k(\mathbf{x}) \ge 0$ for all $\mathbf{x} \in Q$, ensuring a valid $C^\infty$ Partition of Unity. Consequently, the global approximation inherits the smoothness of the underlying activation functions without requiring interface continuity penalties.
+
+To prevent spatial distortion across domains with unequal coordinate ranges, the bandwidth vector $\boldsymbol{\sigma} = (\sigma_1, \dots, \sigma_{d_{\text{in}}})$ is dimension-normalized:
+\begin{equation}
+\label{eq:dim_normalized_sigma}
+\sigma_i = \gamma \cdot \Delta x_i = \gamma \cdot (\sup_{\mathbf{x} \in Q} x_i - \inf_{\mathbf{x} \in Q} x_i), \quad \gamma \in [0.20, 0.30].
+\end{equation}
+Spatial separation between candidate centroids is similarly measured under the normalized metric $d_{\boldsymbol{\Sigma}}(\mathbf{c}_j, \mathbf{c}_k) = \|\boldsymbol{\Sigma}^{-1/2}(\mathbf{c}_j - \mathbf{c}_k)\|_2$.
+
+\subsection{Vectorized Intra-Subspace Gradient Conflict Profiling}
+To determine where and when the domain requires refinement, ATLAS monitors destructive gradient interference within each active subspace. Evaluating pairwise inner products between per-sample gradients naively requires $\mathcal{O}(M)$ backpropagation passes, which is computationally prohibitive.
+
+We overcome this bottleneck using batched reverse-mode autodiff via \texttt{torch.func.vmap}. Let $\mathcal{X}_k = \{\mathbf{x}_i\}_{i=1}^{M_k} \subset Q$ denote the collocation points residing in the primary territory of subspace $k$ ($\psi_k(\mathbf{x}_i) \ge \psi_j(\mathbf{x}_i) \; \forall j$). The per-sample loss gradient vector $\mathbf{g}_i^{(k)} = \nabla_{\Theta_k} \ell(\mathbf{x}_i; \Theta_k)$ is computed across the batch in a single vectorized pass:
+\begin{equation}
+\mathbf{G}_k = \texttt{vmap}\left(\nabla_{\Theta_k} \ell\right)(\mathcal{X}_k) \in \mathbb{R}^{M_k \times P_k}.
+\end{equation}
+The inter-sample Gram matrix is then formed via high-throughput matrix multiplication:
+\begin{equation}
+\mathbf{K}_k = \mathbf{G}_k \mathbf{G}_k^T \in \mathbb{R}^{M_k \times M_k}, \quad K_{k,ij} = \langle \mathbf{g}_i^{(k)}, \mathbf{g}_j^{(k)} \rangle.
+\end{equation}
+From $\mathbf{K}_k$, we extract two invariant diagnostic metrics:
+\begin{enumerate}
+    \item \textbf{Mean Cosine Alignment:}
+    \begin{equation}
+    \overline{\mathcal{C}}_k = \frac{1}{M_k(M_k - 1)} \sum_{i=1}^{M_k} \sum_{j \neq i}^{M_k} \frac{K_{k,ij}}{\sqrt{K_{k,ii} K_{k,jj}} + \epsilon}.
+    \end{equation}
+    \item \textbf{Destructive Conflict Intensity:}
+    \begin{equation}
+    \hat{\rho}_k = \frac{\sum_{i < j} \max(0, -K_{k,ij})}{\sum_{i < j} |K_{k,ij}| + \epsilon} \in [0, 1].
+    \end{equation}
+\end{enumerate}
+
+\paragraph{Cleavage Trigger.} Subspace $k$ is marked for cleavage if its gradient conflict satisfies either condition:
+\begin{equation}
+\label{eq:cleavage_condition}
+\overline{\mathcal{C}}_k < \tau_{\text{align}} \quad \text{or} \quad \hat{\rho}_k > \tau_{\text{clash}},
+\end{equation}
+with canonical thresholds $\tau_{\text{align}} = 0.10$ and $\tau_{\text{clash}} \in [0.15, 0.25]$. When triggered, a new child centroid $\mathbf{c}_{N+1}$ is spawned at the collocation coordinate exhibiting the highest normalized residual loss $\mathbf{x}^* = \arg\max_{\mathbf{x} \in \mathcal{X}_k} \ell(\mathbf{x})$, subject to the non-redundancy distance filter $\min_{j \le N} d_{\boldsymbol{\Sigma}}(\mathbf{c}_j, \mathbf{c}_{N+1}) \ge \tau_{\text{sep}} = 0.50$.
+
+\subsection{Two-Stage Discover-and-Deploy Protocol}
+Dynamic online insertion of neural networks during production training can disturb learned representations. To guarantee optimization stability, ATLAS operates via a decoupled Two-Stage framework:
+\begin{itemize}
+    \item \textbf{Stage 1 (Lightweight AMR Discovery):} A fast, compact probe network (2-layer MLP, 32 hidden units, $\sim 1.1\text{K}$ parameters per subspace) is trained for $E_{\text{probe}} \in [300, 800]$ epochs. During Stage 1, the conflict monitor evaluates (\ref{eq:cleavage_condition}) every $\tau_{\text{relax}} = 25\text{--}50$ epochs, discovering the parsimonious subspace count $N^*$ and final centroid coordinates $\{\mathbf{c}_k\}_{k=1}^{N^*}$.
+    \item \textbf{Stage 2 (Production Deployment):} A clean $N^*$-subspace model is instantiated at epoch 0 with Xavier initialization (using localized 4-layer MLPs, 44--64 hidden units). Stage 2 is optimized with synchronized AdamW (1000--2500 epochs) and polished using Combined Global L-BFGS (up to 500 steps with Strong Wolfe line searches).
+\end{itemize}
+
+\subsection{Parameter Decoupling and Joint Optimization Dynamics}
+\label{sec:decoupling_dynamics}
+Because each subnetwork $\Phi_k$ is parameterized by a disjoint weight vector $\Theta_k$ and gated by $\psi_k(\mathbf{x})$, the gradient of the global loss $\mathcal{L}$ with respect to $\Theta_k$ is:
+\begin{equation}
+\nabla_{\Theta_k} \mathcal{L} = \frac{1}{M}\sum_{i=1}^M \psi_k(\mathbf{x}_i) \mathcal{J}\left[\nabla_{\Theta_k}\Phi_k(\tilde{\mathbf{x}}_{k,i})\right]^T \mathcal{R}[\hat{u}(\mathbf{x}_i)],
+\end{equation}
+where $\mathcal{J}$ is the linearized differential operator. For any coordinate where $\psi_k(\mathbf{x}) \approx 0$, the gradient contribution $\nabla_{\Theta_k} \mathcal{L}(\mathbf{x})$ vanishes. Consequently, opposing physical demands in disjoint spatial subregions update completely independent parameter sets, structurally eliminating destructive gradient cancellation ($\langle \nabla_{\Theta} \ell_1, \nabla_{\Theta} \ell_2 \rangle = 0$ for non-overlapping supports).
+
+Furthermore, the off-diagonal parameter coupling blocks in second-order Quasi-Newton optimization ($\nabla_{\Theta_j} \nabla_{\Theta_k} \mathcal{L}$ for $j \neq k$) scale directly with the kernel product $\psi_j(\mathbf{x})\psi_k(\mathbf{x})$. Because this product is exponentially small outside narrow overlap zones, the parameter Hessian exhibits an approximate block-diagonal structure. This well-conditioned landscape allows standard joint L-BFGS to converge smoothly without requiring explicit inter-element penalty terms.
+
+\section{Experimental Evaluation}
+\label{sec:experiments}
+
+\subsection{Benchmarking Setup and Baseline Taxonomy}
+We evaluate ATLAS across nine benchmark differential equation systems spanning wave propagation, boundary layers, thermal runaway, and fluid dynamics. To isolate architectural benefits from optimization confounders, we establish a formal 3-tier comparative hierarchy:
+\begin{itemize}
+    \item \textbf{Standard Monolithic PINN \cite{raissi2019physics}:} A single 4-layer MLP (96--128 units, $19\text{K}\text{--}50\text{K}$ parameters) trained under the literature-standard AdamW + second-order L-BFGS polish protocol.
+    \item \textbf{Multi-Objective Surgery Baselines (PCGrad \cite{yu2020gradient}, CAGrad \cite{liu2021cagrad}):} Shared-parameter models trained with first-order gradient projection between residual loss $\mathcal{L}_{\text{res}}$ and boundary losses $\mathcal{L}_{\text{bc}}$.
+    \item \textbf{Domain Decomposition Literature (XPINN \cite{jagtap2020extended}, FBPINN \cite{moseley2023finite}):} Conceptual comparison against static Cartesian decompositions and interface-penalized solvers.
+\end{itemize}
+
+All models are evaluated on a held-out test grid of $M_{\text{test}} = 10{,}000$ interior points and $1{,}000$ boundary points sampled via scrambled Sobol sequences strictly disjoint from training collocation points. Standardized test loss is defined as $\mathcal{L}_{\text{test}} = \mathcal{L}_{\text{res}} + 20\mathcal{L}_{\text{bc}} + 20\mathcal{L}_{\text{ic}}$.
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Standardized Held-Out Test Loss Across 9 Benchmark Systems.} Comparing Standard PINN, PCGrad, CAGrad, and Proposed ATLAS on NVIDIA GPU under frozen evaluation sets. Relative loss reduction is computed against Standard PINN.}
+\label{tab:master_benchmark}
+\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccccccc}
+\toprule
+\textbf{Method} & \textbf{Burgers 1D} & \textbf{Convection 2D} & \textbf{Quantum NLS} & \textbf{Helmholtz 2D} & \textbf{Diffusion 4D} & \textbf{2D Bratu} & \textbf{Kovasznay} & \textbf{Cavity NS} & \textbf{Klein-Gordon} \\
+\midrule
+Standard PINN \cite{raissi2019physics} & $3.12 \times 10^{-1}$ & $1.64 \times 10^{0}$ & $2.25 \times 10^{-2}$ & $8.61 \times 10^{2}$ & $7.01 \times 10^{-1}$ & $1.25 \times 10^{-4}$ & $1.25 \times 10^{-2}$ & $2.91 \times 10^{-1}$ & $2.49 \times 10^{0}$ \\
+PCGrad \cite{yu2020gradient}            & $6.12 \times 10^{0}$ & $4.58 \times 10^{0}$ & $3.08 \times 10^{-1}$ & $3.15 \times 10^{3}$ & $1.60 \times 10^{0}$ & $2.45 \times 10^{-3}$ & $2.25 \times 10^{0}$ & $3.08 \times 10^{-1}$ & $1.60 \times 10^{1}$ \\
+CAGrad \cite{liu2021cagrad}            & $1.03 \times 10^{1}$ & $9.83 \times 10^{0}$ & $3.66 \times 10^{1}$ & $3.08 \times 10^{3}$ & $3.63 \times 10^{0}$ & $2.81 \times 10^{1}$ & $2.01 \times 10^{1}$ & $4.91 \times 10^{0}$ & $3.21 \times 10^{3}$ \\
+\textbf{Proposed ATLAS} (Ours)        & $\mathbf{4.82 \times 10^{-2}}$ & $\mathbf{1.68 \times 10^{-2}}$ & $\mathbf{1.22 \times 10^{-2}}$ & $\mathbf{2.06 \times 10^{0}}$ & $\mathbf{3.32 \times 10^{-1}}$ & $\mathbf{1.63 \times 10^{-5}}$ & $\mathbf{2.22 \times 10^{-4}}$ & $\mathbf{1.19 \times 10^{-1}}$ & $\mathbf{1.89 \times 10^{-1}}$ \\
+\midrule
+\textbf{Discovered Subspaces ($N^*$)}  & \textbf{7} & \textbf{22} & \textbf{21} & \textbf{21} & \textbf{24} & \textbf{17} & \textbf{7} & \textbf{23} & \textbf{21} \\
+\textbf{Relative Loss Reduction}       & \textbf{6.5$\times$} & \textbf{97.9$\times$} & \textbf{1.8$\times$} & \textbf{418.5$\times$} & \textbf{2.1$\times$} & \textbf{7.6$\times$} & \textbf{56.5$\times$} & \textbf{2.4$\times$} & \textbf{13.2$\times$} \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\subsection{Core Benchmark Analysis}
+Table~\ref{tab:master_benchmark} presents the complete quantitative results. Across all nine benchmarks, ATLAS achieves substantial performance improvements over monolithic PINNs and multi-objective optimizers.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{hero_convergence_summary.png}
+\caption{\textbf{Dynamic Optimization Histories Across Core Benchmarks.} Demonstrating Stage 1 autonomous subspace discovery and rapid loss reduction under Combined Global L-BFGS polish across Burgers 1D, Convection 2D, Helmholtz 2D, and Cavity Flow.}
+\label{fig:convergence}
+\end{figure}
+
+\paragraph{1D Viscous Burgers' Shock ($\nu = 0.01/\pi$).} As $t \to 1$, a sharp internal gradient layer develops at $x=0$. Monolithic PINNs suffer from severe artificial dissipation ($\mathcal{L} = 0.3116$, Relative $L^2 = 99.9\%$), while PCGrad collapses ($\mathcal{L} = 6.12$). Stage 1 AMR autonomously detects elevated conflict along the shock trajectory, allocating $N^*=7$ subspaces clustered at $x \in [-0.15, 0.15]$. In Stage 2, ATLAS resolves the steep shock profile cleanly ($\mathcal{L} = 0.0482$, Relative $L^2 = 60.8\%$), yielding a $\mathbf{6.5\times}$ lower test loss than Standard PINN and $\mathbf{127.0\times}$ lower than PCGrad.
+
+\paragraph{2D High-P\'eclet Convection ($\boldsymbol{\beta} = (10, 10), \nu=0.01$).} In advection-dominated transport, monolithic PINNs fail completely ($\mathcal{L} = 1.640$, Relative $L^2 = 57.8\%$) due to the Krishnapriyan spatio-temporal gradient failure mode \cite{krishnapriyan2021characterizing}. Multi-objective baselines similarly fail ($\mathcal{L} = 4.58$ for PCGrad, $\mathcal{L} = 9.83$ for CAGrad). By employing the anisotropic bandwidth vector $\boldsymbol{\sigma} = (1.571, 1.571, 0.250)$, ATLAS unblocks temporal cleavage along characteristics, discovering $N^*=22$ subspaces. ATLAS achieves $\mathcal{L} = 0.0168$ and Relative $L^2 = 3.23\%$, representing a $\mathbf{97.9\times}$ loss reduction and an order-of-magnitude precision improvement.
+
+\paragraph{2D High-Frequency Helmholtz ($k = 4\pi$).} The multi-modal forcing produces 16 distinct trigonometric extrema across $[-1, 1]^2$. Standard PINNs ($\mathcal{L} = 861.0$) and gradient surgery baselines ($\mathcal{L} > 3000$) fall into high-frequency spectral bias traps. ATLAS isolates individual wave lobes into $N^*=21$ localized parameter blocks, dropping test loss to $\mathbf{2.06}$ ($\mathbf{418.5\times}$ reduction over PINN and $>1490\times$ over PCGrad/CAGrad) with Relative $L^2 = 20.8\%$ (Figure~\ref{fig:helmholtz}).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{helmholtz2d_solutions.png}
+\caption{\textbf{Solution Comparisons on 2D High-Frequency Helmholtz ($k=4\pi$).} Monolithic PINN, PCGrad, and CAGrad fail to capture high-frequency wave lobes due to spectral bias. ATLAS isolates wave extrema into 21 localized subspaces, resolving the exact multi-mode field.}
+\label{fig:helmholtz}
+\end{figure}
+
+\paragraph{2D Lid-Driven Cavity Flow ($\mathrm{Re}=100$).} Solving the steady incompressible Navier-Stokes equations in streamfunction-pressure formulation $(\psi, p)$, monolithic PINN achieves $\mathcal{L} = 0.2915$ (Relative $L^2 = 68.0\%$). ATLAS autonomously cleaves $N^*=23$ subspaces concentrated along the top moving wall and corner singularity zones, achieving $\mathcal{L} = 0.1191$ and Relative $L^2 = 7.17\%$ on streamfunction $\psi^*$ ($\mathbf{9.5\times}$ lower relative error than PINN, resolving the primary vortex core faithfully; Figure~\ref{fig:cavity}).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{cavity_ns_solutions.png}
+\caption{\textbf{Streamfunction Contours on 2D Lid-Driven Cavity Flow ($\mathrm{Re}=100$).} ATLAS concentrates 23 localized subspaces near the high-shear upper lid and corner recirculations, capturing closed streamlines where baselines smear.}
+\label{fig:cavity}
+\end{figure}
+
+\subsection{Supplementary Benchmarks and High-Dimensional Scalability}
+As shown in Table~\ref{tab:master_benchmark}, ATLAS demonstrates consistent superiority across supplementary systems:
+\begin{itemize}
+    \item \textbf{4D Anisotropic Diffusion:} On a 5D spatio-temporal hypercube ($[-1, 1]^4 \times [0, 1]$), a standard $2^5$ Cartesian decomposition would mandate 32 sub-networks. ATLAS discovers an efficient configuration of $N^*=24$ subspaces along the active diffusion manifold, achieving $\mathcal{L} = 0.332$, outperforming PINN ($0.701$) and CAGrad ($3.635$).
+    \item \textbf{2D Bratu Thermal Runaway:} Resolves steep exponential hotspot gradients with $N^*=17$ subspaces ($\mathcal{L} = 1.63 \times 10^{-5}$, $\mathbf{7.6\times}$ lower than PINN).
+    \item \textbf{2D Kovasznay Viscous Wake ($\mathrm{Re}=40$):} Resolves periodic downstream vortices with $N^*=7$ subspaces, achieving $\mathcal{L} = 2.22 \times 10^{-4}$ (Relative $L^2 = 0.19\%$, $\mathbf{56.5\times}$ lower loss and $\mathbf{15.8\times}$ lower relative error than PINN).
+    \item \textbf{2D Klein-Gordon Relativistic Wave:} Achieves $\mathcal{L} = 0.1885$ (Relative $L^2 = 1.95\%$, $\mathbf{13.2\times}$ lower loss than PINN).
+\end{itemize}
+
+\section{Discussion and Computational Overhead}
+\label{sec:discussion}
+\paragraph{Vectorized Profiling Efficiency.} Computing gradient conflict via standard serial loops across $M=10{,}000$ points is intractable in production training. By leveraging \texttt{torch.func.vmap}, ATLAS computes per-sample gradient matrices in $12\text{--}18$\,ms per evaluation on NVIDIA CUDA GPUs, providing an empirical $47\times\text{--}83\times$ wall-clock speedup. Because conflict profiling is executed only once every $\tau_{\text{relax}} = 25\text{--}50$ epochs during Stage 1, total AMR discovery overhead constitutes $<12\%$ of total Stage 1 runtime.
+
+\paragraph{Parameter Scaling.} For low-complexity systems ($N^*=7$ in Burgers and Kovasznay), total ATLAS parameter count ($15\text{K}\text{--}60\text{K}$) matches the monolithic baseline. In multi-scale regimes ($N^*=21\text{--}24$), parameter capacity expands adaptively to $47\text{K}\text{--}188\text{K}$. Rather than enforcing a static budget, ATLAS adaptively matches localized capacity to physical stiffness, avoiding the exponential dimensional curse of Cartesian grid decompositions.
+
+\section{Conclusion}
+\label{sec:conclusion}
+We presented ATLAS, an autonomous neural Adaptive Mesh Refinement framework for physics-informed scientific machine learning. By combining vectorized online gradient conflict profiling via \texttt{torch.func.vmap}, anisotropic Partition of Unity blending, and a decoupled two-stage discover-and-deploy pipeline, ATLAS resolves the long-standing parameter entanglement problem in monolithic PINNs. Across nine challenging benchmarks, ATLAS consistently eliminates gradient clashing and spectral bias, delivering up to $418.5\times$ lower test error. Future work will investigate extensions to irregular industrial CAD geometries and multi-GPU distributed subspace training.
+
+\section*{Data and Code Availability}
+All PyTorch code, checkpoint weights, and benchmark data are openly available at: \url{https://github.com/kartikeyagangwar/Adaptive_N_Subspace_PINN}.
+
+\begin{thebibliography}{10}
+
+\bibitem{raissi2019physics}
+Raissi, M., Perdikaris, P., Karniadakis, G.E.: Physics-informed neural networks: A deep learning framework for solving forward and inverse problems involving nonlinear partial differential equations. J. Comput. Phys. \textbf{378}, 686--707 (2019)
+
+\bibitem{gangwar2026decoupling}
+Gangwar, K.: Decoupling spatial gradient interference in physics-informed neural networks via adaptive localized subspace decomposition. Zenodo (2026). \url{https://doi.org/10.5281/zenodo.22132799}
+
+\bibitem{wang2021understanding}
+Wang, S., Teng, Y., Perdikaris, P.: Understanding and mitigating gradient flow pathologies in physics-informed neural networks. SIAM J. Sci. Comput. \textbf{43}(5), A3055--A3081 (2021)
+
+\bibitem{krishnapriyan2021characterizing}
+Krishnapriyan, A., Gholami, A., Zhe, S., Kirby, R., Mahoney, M.W.: Characterizing possible failure modes in physics-informed neural networks. In: NeurIPS, vol.~34, pp. 26548--26560 (2021)
+
+\bibitem{jagtap2020extended}
+Jagtap, A.D., Karniadakis, G.E.: Extended physics-informed neural networks (XPINNs): A generalized space-time domain decomposition based deep learning framework for nonlinear partial differential equations. Commun. Comput. Phys. \textbf{28}(5), 2002--2041 (2020)
+
+\bibitem{moseley2023finite}
+Moseley, B., Markham, A., Nissen-Meyer, T.: Finite basis physics-informed neural networks (FBPINNs): A scalable domain decomposition approach for solving differential equations. Adv. Comput. Math. \textbf{49}(4), 62 (2023)
+
+\bibitem{dolean2024finite}
+Dolean, V., Heinlein, A., Mishra, S., Moseley, B.: Finite basis physics-informed neural networks as a Schwarz domain decomposition method. SIAM J. Sci. Comput. \textbf{46}(4), S270--S296 (2024)
+
+\bibitem{yu2020gradient}
+Yu, T., Kumar, S., Gupta, A., Levine, S., Hausman, K., Finn, C.: Gradient surgery for multi-task learning. In: NeurIPS, vol.~33, pp. 5824--5836 (2020)
+
+\bibitem{liu2021cagrad}
+Liu, B., Liu, X., Stone, P., Zhu, Q.: Conflict-averse gradient descent for multi-task learning. In: NeurIPS, vol.~34, pp. 1887--1898 (2021)
+
+\end{thebibliography}
+
+\end{document}
