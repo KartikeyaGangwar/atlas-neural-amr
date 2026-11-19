@@ -1,96 +1,100 @@
-\documentclass[10pt,a4paper]{article}
+\documentclass[10pt,a4paper,twocolumn]{article}
 
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
 \usepackage{lmodern}
-\usepackage[top=1.3cm,bottom=1.3cm,left=1.5cm,right=1.5cm]{geometry}
+\usepackage[margin=1.8cm]{geometry}
 \usepackage{amsmath,amssymb}
 \usepackage{graphicx}
 \usepackage{booktabs}
+\usepackage[protrusion=true,expansion=false]{microtype}
 \usepackage{titlesec}
-\usepackage{caption}
 \usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
 
-% Clean, tight spacing for 1-page layout
-\titlespacing\section{0pt}{3pt plus 1pt minus 1pt}{1.5pt plus 1pt minus 1pt}
-\titleformat{\section}{\bfseries\small}{\thesection.}{0.4em}{}
+% Tight section formatting for 2-page executive abstract
+\titlespacing\section{0pt}{6pt plus 2pt minus 2pt}{3pt plus 1pt minus 1pt}
+\titlespacing\subsection{0pt}{4pt plus 1pt minus 1pt}{2pt plus 1pt minus 1pt}
 
-\captionsetup[table]{font=scriptsize,skip=1pt}
-\captionsetup[figure]{font=scriptsize,skip=1pt}
-
-\title{\vspace{-1.1cm}\textbf{\normalsize\bfseries ATLAS: An Autonomous Neural AMR Solver for Stiff Multiscale Multiphysics in CAE Simulation Pipelines}\vspace{-0.35cm}}
+\title{\textbf{\Large ATLAS: An Autonomous Neural AMR Solver for Stiff Multiscale Multiphysics in CAE Simulation Pipelines}}
 
 \author{
-    \textbf{\small Kartikeya Gangwar} \\
-    \footnotesize Department of Mathematics, University of Delhi, Delhi 110007, India \\
-    \footnotesize Email: \href{mailto:kartikeyagangwar@proton.me}{\texttt{kartikeyagangwar@proton.me}}
+    \textbf{Kartikeya Gangwar} \\
+    \small Department of Mathematics, University of Delhi, Delhi 110007, India \\
+    \small Email: \href{mailto:kartikeyagangwar@proton.me}{\texttt{kartikeyagangwar@proton.me}}
 }
-\date{\vspace{-0.85cm}}
+\date{}
 
 \begin{document}
 
 \maketitle
 \thispagestyle{empty}
+\pagestyle{empty}
+
+\begin{abstract}
+\noindent Physics-Informed Neural Networks (PINNs) offer transformative potential as surrogate solvers and mesh-free digital twins in Computer-Aided Engineering (CAE). However, their deployment in industrial simulation pipelines remains severely bottlenecked by optimization failures in stiff, multi-scale, and convection-dominated regimes. We present \textbf{ATLAS} (Adaptive Tiling of Localized Anisotropic Subspaces), an autonomous neural Adaptive Mesh Refinement (AMR) framework designed for industrial PDE simulation. ATLAS dynamically detects localized gradient conflict online via batched reverse-mode autodiff (\texttt{torch.func.vmap}) at line-rate, cleaves localized anisotropic subdomains governed by bandwidth matrix $\boldsymbol{\Sigma}$, and blends solutions seamlessly under a $C^\infty$ Partition of Unity (PoU) with zero interface continuity loss penalties. Evaluated across high-frequency wave propagation and Navier-Stokes fluid flows, ATLAS reduces held-out test errors by up to $418.5\times$ over monolithic PINNs and achieves an order-of-magnitude accuracy gain in recirculating shear layers, providing an automated, mesh-free solver ready for next-generation CAE workflows.
+\end{abstract}
 
 \vspace{-0.2cm}
-\noindent{\footnotesize\textbf{Abstract.} Physics-Informed Neural Networks (PINNs) hold strong promise as surrogate solvers in Computer-Aided Engineering (CAE). However, industrial deployment is severely hindered by optimization failure in stiff, multi-scale, and convection-dominated regimes. We introduce \textbf{ATLAS} (Adaptive Tiling of Localized Anisotropic Subspaces), an autonomous neural Adaptive Mesh Refinement (AMR) framework. ATLAS detects localized gradient conflict online via batched reverse-mode autodiff (\texttt{torch.func.vmap}) at line-rate, dynamically cleaves localized anisotropic subdomains governed by bandwidth $\boldsymbol{\Sigma}$, and blends solutions seamlessly under a $C^\infty$ Partition of Unity (PoU) without interface continuity loss penalties. Evaluated on canonical CAE benchmarks, ATLAS reduces test errors by up to $418.5\times$ over monolithic PINNs and resolves recirculating vortices with an order-of-magnitude lower error.}
+\section{Industrial Motivation \& The Entanglement Barrier}
+Modern Computer-Aided Engineering (CAE) environments (e.g., Ansys, Siemens Simcenter, Altair, OpenFOAM) rely extensively on Adaptive Mesh Refinement (AMR) to resolve localized multi-scale phenomena such as acoustic shock layers, boundary layer separation, and localized recirculation. In classical finite element methods (FEM), AMR dynamically concentrates degrees of freedom exclusively where localized error indicators are elevated, preserving numerical stability without computational waste.
 
-\vspace{-0.1cm}
-\section{Industrial Motivation \& Parameter Entanglement Barrier}
-Modern CAE environments (e.g., Ansys, Siemens Simcenter, OpenFOAM) rely on Adaptive Mesh Refinement to concentrate degrees of freedom around steep gradients, boundary layers, and shocks without manual re-meshing. In contrast, standard PINNs map the entire domain through a monolithic parameter vector $\Theta \in \mathbb{R}^P$. When the domain contains disparate physical regimes (e.g., localized shear vs.\ quiescent flow), collocation points backpropagate opposing gradients ($\langle \mathbf{g}_1, \mathbf{g}_2 \rangle < 0$), causing destructive gradient interference, artificial numerical dissipation, and boundary divergence. Multi-objective projection schemes (PCGrad, CAGrad) share the same weights and suppress essential constraints, while Cartesian domain decomposition methods (XPINN, FBPINN) suffer from exponential grid explosion $\mathcal{O}(K_0^d)$ or fragile interface penalties.
+In contrast, contemporary Physics-Informed Neural Networks (PINNs) optimize a single, monolithic parameter vector $\Theta \in \mathbb{R}^P$ across the entire spatio-temporal domain $Q \subset \mathbb{R}^{d_{\text{in}}}$. In the presence of disparate regional physics---such as a localized shear layer adjacent to quiescent laminar flow---collocation points backpropagate diametrically opposed gradient updates to shared weights:
+\begin{equation}
+\langle \nabla_\Theta \ell(\mathbf{x}_1), \nabla_\Theta \ell(\mathbf{x}_2) \rangle < 0, \quad \mathbf{x}_1 \in \Omega_{\text{shear}}, \; \mathbf{x}_2 \in \Omega_{\text{laminar}}.
+\end{equation}
+This spatial gradient clashing triggers severe optimization stalling, artificial numerical diffusion, and boundary collapse. Multi-objective projection methods (PCGrad, CAGrad) share the same weights and suppress essential constraints, while Cartesian domain decomposition methods (XPINN, FBPINN) explode combinatorially as $\mathcal{O}(K_0^d)$ or impose fragile interface transmission penalty terms.
 
-\vspace{-0.1cm}
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{combined_cae_solutions.png}
+\vspace{-0.2cm}
+\caption{\textbf{Empirical Solution Fields on Canonical CAE Benchmarks.} Comparing Ground Truth $u^*$, Standard PINN, PCGrad, CAGrad, and Proposed ATLAS (Ours). \textbf{Top Row:} 2D High-Frequency Helmholtz ($k=4\pi$) wave scattering ($418.5\times$ error reduction over PINN). \textbf{Bottom Row:} 2D Incompressible Cavity Flow ($\mathrm{Re}=100$) streamfunction $\psi^*$ resolving corner recirculation vortices ($9.5\times$ lower relative error).}
+\label{fig:cae_solutions}
+\end{figure*}
+
 \section{The ATLAS Methodological Framework}
-ATLAS resolves parameter entanglement through three core innovations:
-\begin{enumerate}\setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}\small
-    \item \textbf{Vectorized Online Conflict Profiling (\texttt{torch.func.vmap}):} Per-sample gradients and their Gram matrix $\mathbf{K}_k = \mathbf{G}_k \mathbf{G}_k^T$ are evaluated across collocation batches in $12\text{--}18$\,ms on GPU ($47\times\text{--}83\times$ faster than serial loops). Subspaces exceeding conflict thresholds ($\overline{\mathcal{C}}_k < 0.10$ or $\hat{\rho}_k > 0.20$) automatically spawn child centroids at coordinates of peak PDE residual.
-    \item \textbf{Dimension-Normalized Anisotropic Partition of Unity:} Subspaces are synthesized via $\hat{u}(\mathbf{x}) = \sum_{k=1}^N \psi_k(\mathbf{x})\Phi_k(\tilde{\mathbf{x}}_k; \Theta_k)$, with normalized Gaussian gates $\psi_k(\mathbf{x}) = w_k(\mathbf{x})/\sum_j w_j(\mathbf{x})$ and coordinate bandwidths $\sigma_i = \gamma \Delta x_i$ ($\gamma \in [0.20, 0.30]$). Disjoint parameter blocks $\Theta_k$ eliminate inter-subspace gradient clashing, while $C^\infty$ blending removes all interface loss penalties.
-    \item \textbf{Two-Stage Discover-and-Deploy Protocol:} A lightweight Stage~1 probe ($32 \times 2$ MLP, $\sim 1.1\text{K}$ parameters/subspace) discovers the parsimonious count $N^*$ and centroid coordinates. Stage~2 then trains a clean production model polished by joint second-order Quasi-Newton (Combined Global L-BFGS).
-\end{enumerate}
+ATLAS eliminates parameter entanglement through an autonomous, physics-driven domain decomposition engine designed as a plug-and-play neural solver:
 
-\vspace{-0.2cm}
-\section{Empirical Validation on Key CAE Benchmarks}
+\paragraph{1. Vectorized Conflict Profiling via \texttt{torch.func.vmap}:} Rather than relying on heuristic error estimators, ATLAS directly profiles destructive gradient interference online. Leveraging batched autodiff via \texttt{torch.func.vmap}, ATLAS evaluates per-sample gradients and computes the inter-sample Gram matrix $\mathbf{K}_k = \mathbf{G}_k \mathbf{G}_k^T$ across $M_k$ collocation points in $12\text{--}18$\,ms on modern GPUs ($47\times\text{--}83\times$ faster than serial loops). Subspaces exceeding conflict thresholds ($\overline{\mathcal{C}}_k < 0.10$ or $\hat{\rho}_k > 0.20$) automatically spawn child centroids at coordinates exhibiting maximum residual error.
 
-\vspace{-0.15cm}
+\paragraph{2. Dimension-Normalized Anisotropic Partition of Unity:} Subspaces are synthesized under a global $C^\infty$ Partition of Unity:
+\begin{equation}
+\hat{u}(\mathbf{x}; \boldsymbol{\Theta}) = \sum_{k=1}^N \psi_k(\mathbf{x}) \Phi_k(\tilde{\mathbf{x}}_k; \Theta_k), \quad \psi_k(\mathbf{x}) = \frac{w_k(\mathbf{x})}{\sum_{j=1}^N w_j(\mathbf{x})},
+\end{equation}
+where $w_k(\mathbf{x}) = \exp(-\frac{1}{2}\|\mathbf{x}-\mathbf{c}_k\|_{\boldsymbol{\Sigma}}^2)$ and $\tilde{\mathbf{x}}_k = \boldsymbol{\Sigma}^{-1/2}(\mathbf{x}-\mathbf{c}_k)$. The bandwidth matrix $\boldsymbol{\Sigma} = \operatorname{diag}(\sigma_1^2, \dots, \sigma_{d_{\text{in}}}^2)$ is dimension-normalized ($\sigma_i = \gamma \Delta x_i, \gamma \in [0.20, 0.30]$), enabling elongated ellipsoidal subdomains that track high-P\'eclet convective characteristics. Because $\sum_k \psi_k(\mathbf{x}) \equiv 1$, no interface transmission penalties are required.
+
+\paragraph{3. Two-Stage Discover-and-Deploy Protocol:} An exploratory Stage 1 probe network ($32 \times 2$ MLP, $\sim 1.1\text{K}$ parameters per subspace) autonomously determines the optimal subspace count $N^*$ and spatial centroids $\{\mathbf{c}_k\}$. Stage 2 then deploys an uncorrupted production architecture initialized from scratch, optimized with AdamW and polished using Combined Global L-BFGS.
+
+\section{Empirical Validation on Stiff CAE Benchmarks}
+
 \begin{table}[h!]
 \centering
-\captionof{table}{\textbf{Quantitative Benchmark Test Loss.} Evaluated on $10{,}000$ held-out test points.}
+\caption{\textbf{Quantitative Test Loss Comparison on Key CAE Benchmarks.} Evaluated on $10{,}000$ held-out test points.}
 \label{tab:cae_results}
-\resizebox{0.98\textwidth}{!}{%
+\scriptsize
+\resizebox{\columnwidth}{!}{%
 \begin{tabular}{lcccc}
 \toprule
-\textbf{Benchmark Problem} & \textbf{Standard PINN [1]} & \textbf{PCGrad [2]} & \textbf{Proposed ATLAS (Ours)} & \textbf{Relative Error Reduction} \\
+\textbf{Benchmark Problem} & \textbf{Standard PINN} & \textbf{PCGrad} & \textbf{ATLAS (Ours)} & \textbf{Gain} \\
 \midrule
-1D Viscous Burgers' Shock ($\nu=0.01/\pi$) & $3.12 \times 10^{-1}$ & $6.12 \times 10^{0}$ & $\mathbf{4.82 \times 10^{-2}}$ & $\mathbf{6.5\times\text{ lower loss}}$ \\
-2D High-P\'eclet Convection ($\beta=10, \mathrm{Pe}=10^3$) & $1.64 \times 10^{0}$ & $4.58 \times 10^{0}$ & $\mathbf{1.68 \times 10^{-2}}$ & $\mathbf{97.9\times\text{ lower loss (17.9}\times\text{ lower Rel }L^2)}$ \\
-2D High-Frequency Helmholtz ($k=4\pi$) & $8.61 \times 10^{2}$ & $3.15 \times 10^{3}$ & $\mathbf{2.06 \times 10^{0}}$ & $\mathbf{418.5\times\text{ lower loss}}$ \\
-2D Cavity Navier-Stokes ($\mathrm{Re}=100$) & $2.91 \times 10^{-1}$ & $3.08 \times 10^{-1}$ & $\mathbf{1.19 \times 10^{-1}}$ & $\mathbf{2.4\times\text{ lower loss (9.5}\times\text{ lower Rel }L^2)}$ \\
+1D Burgers Shock ($\nu=0.01/\pi$) & $3.12 \times 10^{-1}$ & $6.12 \times 10^{0}$ & $\mathbf{4.82 \times 10^{-2}}$ & $\mathbf{6.5\times}$ \\
+2D Convection ($\beta=10, \mathrm{Pe}=10^3$) & $1.64 \times 10^{0}$ & $4.58 \times 10^{0}$ & $\mathbf{1.68 \times 10^{-2}}$ & $\mathbf{97.9\times}$ \\
+2D Helmholtz Wave ($k=4\pi$) & $8.61 \times 10^{2}$ & $3.15 \times 10^{3}$ & $\mathbf{2.06 \times 10^{0}}$ & $\mathbf{418.5\times}$ \\
+2D Cavity Flow ($\mathrm{Re}=100$) & $2.91 \times 10^{-1}$ & $3.08 \times 10^{-1}$ & $\mathbf{1.19 \times 10^{-1}}$ & $\mathbf{2.4\times}$ \\
 \bottomrule
 \end{tabular}}
 \end{table}
-\vspace{-0.35cm}
 
-\begin{figure}[h!]
-\centering
-\includegraphics[width=0.96\textwidth,height=4.4cm]{combined_cae_solutions.png}
-\vspace{-0.15cm}
-\captionof{figure}{\textbf{Empirical CAE Solution Fields.} Top: 2D Helmholtz ($k=4\pi$) wave scattering ($418.5\times$ error reduction over PINN). Bottom: 2D Cavity Navier-Stokes ($\mathrm{Re}=100$) streamfunction $\psi^*$ resolving recirculation vortices ($9.5\times$ lower relative $L^2$ error).}
-\label{fig:cae_solutions}
-\end{figure}
-\vspace{-0.3cm}
+We benchmark ATLAS against monolithic PINNs and gradient surgery baselines across standardized canonical benchmarks (Table~\ref{tab:cae_results} and Figure~\ref{fig:cae_solutions}):
+\begin{itemize}
+    \item \textbf{Acoustic Waves \& Helmholtz Scattering ($k=4\pi$):} Monolithic PINNs fall into spectral bias traps ($\mathcal{L} = 861.0$), failing completely to capture high-frequency wave peaks. ATLAS autonomously isolates individual wave lobes into $N^*=21$ localized parameter blocks, dropping test loss to $\mathbf{2.06}$ ($\mathbf{418.5\times}$ reduction; Figure~\ref{fig:cae_solutions}, top).
+    \item \textbf{Viscous Incompressible Navier-Stokes ($\mathrm{Re}=100$):} In 2D lid-driven cavity flow under streamfunction-pressure formulation $(\psi, p)$, standard PINNs smear corner vortices (Relative $L^2 = 68.0\%$). ATLAS ($N^*=23$) clusters centroids along the singular top lid and corner separation zones, capturing closed recirculation vortices with $\mathbf{7.17\%}$ relative $L^2$ error ($\mathbf{9.5\times}$ improvement; Figure~\ref{fig:cae_solutions}, bottom).
+    \item \textbf{High-P\'eclet Convective Transport ($\mathrm{Pe}=10^3$):} By utilizing anisotropic bandwidth $\boldsymbol{\sigma} = (1.57, 1.57, 0.25)$, ATLAS aligns subspaces along convective space-time characteristics, slashing test error by $\mathbf{97.9\times}$ over standard PINNs.
+\end{itemize}
 
-\noindent{\footnotesize\textbf{Key Findings:} In high-frequency Helmholtz scattering ($k=4\pi$), monolithic PINNs trap in spectral bias while ATLAS isolates wave lobes ($418.5\times$ error reduction). In 2D Cavity Navier-Stokes ($\mathrm{Re}=100$), ATLAS concentrates 23 subspaces near the moving lid and corner recirculation zones, reducing streamfunction relative $L^2$ error by $9.5\times$ ($7.17\%$ vs.\ $68.0\%$).}
+\section{CAE Industry Readiness \& Outlook}
+ATLAS is implemented in pure PyTorch (using native \texttt{torch.func.vmap} and second-order L-BFGS) with zero external commercial dependencies. Because each subspace $\Phi_k$ operates on disjoint parameter blocks $\Theta_k$, the forward pass, backward pass, and conflict profiling can be distributed across multi-GPU clusters using standard model-parallel primitives. For CAE R\&D teams developing digital twins and surrogate solvers, ATLAS provides an autonomous, mesh-free neural AMR backbone that eliminates manual domain partitioning while delivering rigorous numerical accuracy across stiff multi-physics regimes.
 
-\vspace{-0.15cm}
-\section{CAE Industry Readiness \& Open-Source Availability}
-{\footnotesize ATLAS is implemented in pure PyTorch with zero external dependencies and supports multi-GPU parallelization. Complete code, checkpoints, and automated benchmark runners are available at: \url{https://github.com/KartikeyaGangwar/atlas-neural-amr}.}
-
-\vspace{0.05cm}
-{\scriptsize
-\noindent\textbf{References:} 
-[1] Raissi et al., \textit{J. Comput. Phys.}, 378:686--707, 2019. 
-[2] Yu et al., \textit{NeurIPS}, 33:5824--5836, 2020. 
-[3] Gangwar, \textit{Zenodo}, DOI: 10.5281/zenodo.22132799, 2026.
-}
+\paragraph{Reproducibility \& Code Availability:} All PyTorch models, benchmark datasets, and checkpoint weights are publicly available at: \url{https://github.com/KartikeyaGangwar/atlas-neural-amr}. Archival preprint DOI: \url{https://doi.org/10.5281/zenodo.22822521}.
 
 \end{document}
