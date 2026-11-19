@@ -35,13 +35,13 @@ Physics-Informed Neural Networks (PINNs) frequently encounter severe optimizatio
 \label{sec:intro}
 Physics-Informed Neural Networks (PINNs) \cite{raissi2019physics} have emerged as a versatile paradigm for forward and inverse problems in computational science and engineering. By embedding governing differential operators directly into neural network loss functionals via automatic differentiation, PINNs eliminate the requirement for traditional mesh generation. However, despite notable successes on smooth, low-frequency boundary value problems, monolithic PINNs routinely fail when applied to stiff, multi-scale, or advection-dominated systems. 
 
-A principal source of these training pathologies is \textit{spatial gradient interference} \cite{wang2021understanding,krishnapriyan2021characterizing}. In standard finite element or finite volume solvers, stiff localized phenomena—such as thin boundary layers, shock transitions, or recirculation vortices—are addressed through Adaptive Mesh Refinement (AMR). Classical AMR dynamically allocates degrees of freedom exclusively where localized error indicators or residual gradients are elevated, leaving quiescent background regions undisturbed. In contrast, standard PINNs map the entire spatio-temporal domain $Q \subset \mathbb{R}^{d_{\text{in}}}$ through a monolithic parameter vector $\Theta \in \mathbb{R}^P$. When the physical domain contains disparate behavioral regimes (e.g., an interior shock wave alongside a quiescent freestream), collocation points across these regions backpropagate diametrically opposed gradient updates to the same shared weights:
+A principal source of these training pathologies is \textit{spatial gradient interference} \cite{wang2021understanding,krishnapriyan2021characterizing}. In standard finite element or finite volume solvers, stiff localized phenomena---such as thin boundary layers, shock transitions, or recirculation vortices---are addressed through Adaptive Mesh Refinement (AMR) \cite{berger1984adaptive}. Classical AMR dynamically allocates degrees of freedom exclusively where localized error indicators or residual gradients are elevated, leaving quiescent background regions undisturbed. In contrast, standard PINNs map the entire spatio-temporal domain $Q \subset \mathbb{R}^{d_{\text{in}}}$ through a monolithic parameter vector $\Theta \in \mathbb{R}^P$. When the physical domain contains disparate behavioral regimes (e.g., an interior shock wave alongside a quiescent freestream), collocation points across these regions backpropagate diametrically opposed gradient updates to the same shared weights:
 \begin{equation}
 \langle \nabla_\Theta \ell(\mathbf{x}_1), \nabla_\Theta \ell(\mathbf{x}_2) \rangle < 0, \quad \mathbf{x}_1 \in \Omega_{\text{shock}}, \; \mathbf{x}_2 \in \Omega_{\text{laminar}}.
 \end{equation}
 This spatial gradient conflict leads to severe gradient cancellation, artificial numerical dissipation, or total training divergence \cite{gangwar2026decoupling}.
 
-While multi-objective gradient surgery algorithms such as PCGrad \cite{yu2020gradient} and CAGrad \cite{liu2021cagrad} attempt to project conflicting gradient vectors during stochastic descent, they operate entirely within a shared parameter space. In multi-scale boundary value problems, projecting gradients often suppresses essential boundary constraints against interior residuals, frequently exacerbating training failure.
+While heuristic point resampling \cite{lu2021deepxde} and multi-objective gradient surgery algorithms such as PCGrad \cite{yu2020gradient} and CAGrad \cite{liu2021cagrad} attempt to project conflicting gradient vectors during stochastic descent, they operate entirely within a shared parameter space. In multi-scale boundary value problems, projecting gradients often suppresses essential boundary constraints against interior residuals, frequently exacerbating training failure.
 
 To address parameter entanglement, domain decomposition techniques such as Extended PINNs (XPINNs) \cite{jagtap2020extended} and Finite Basis PINNs (FBPINNs) \cite{moseley2023finite,dolean2024finite} partition the physical domain across multiple localized sub-networks. However, current implementations suffer from two critical limitations:
 \begin{enumerate}
@@ -73,7 +73,7 @@ The weighting functions $\psi_k(\mathbf{x})$ are defined via normalized anisotro
 \label{eq:pou_weights}
 \psi_k(\mathbf{x}) = \frac{w_k(\mathbf{x})}{\sum_{j=1}^N w_j(\mathbf{x})}, \quad w_k(\mathbf{x}) = \exp\left(-\frac{1}{2}\|\mathbf{x} - \mathbf{c}_k\|_{\boldsymbol{\Sigma}}^2\right),
 \end{equation}
-where $\|\mathbf{v}\|_{\boldsymbol{\Sigma}}^2 = \mathbf{v}^T \boldsymbol{\Sigma}^{-1} \mathbf{v} = \sum_{i=1}^{d_{\text{in}}} (v_i / \sigma_i)^2$. By construction, $\sum_{k=1}^N \psi_k(\mathbf{x}) \equiv 1$ and $\psi_k(\mathbf{x}) \ge 0$ for all $\mathbf{x} \in Q$, ensuring a valid $C^\infty$ Partition of Unity. Consequently, the global approximation inherits the smoothness of the underlying activation functions without requiring interface continuity penalties.
+where $\|\mathbf{v}\|_{\boldsymbol{\Sigma}}^2 = \mathbf{v}^T \boldsymbol{\Sigma}^{-1} \mathbf{v} = \sum_{i=1}^{d_{\text{in}}} (v_i / \sigma_i)^2$. By construction, $\sum_{k=1}^N \psi_k(\mathbf{x}) \equiv 1$ and $\psi_k(\mathbf{x}) \ge 0$ for all $\mathbf{x} \in Q$, ensuring a valid $C^\infty$ Partition of Unity \cite{babuska1997partition}. Consequently, the global approximation inherits the smoothness of the underlying activation functions without requiring interface continuity penalties.
 
 To prevent spatial distortion across domains with unequal coordinate ranges, the bandwidth vector $\boldsymbol{\sigma} = (\sigma_1, \dots, \sigma_{d_{\text{in}}})$ is dimension-normalized:
 \begin{equation}
@@ -247,6 +247,15 @@ Yu, T., Kumar, S., Gupta, A., Levine, S., Hausman, K., Finn, C.: Gradient surger
 
 \bibitem{liu2021cagrad}
 Liu, B., Liu, X., Stone, P., Zhu, Q.: Conflict-averse gradient descent for multi-task learning. In: NeurIPS, vol.~34, pp. 1887--1898 (2021)
+
+\bibitem{babuska1997partition}
+Babu\v{s}ka, I., Melenk, J.M.: The partition of unity method. Int. J. Numer. Meth. Engng. \textbf{40}(4), 727--758 (1997)
+
+\bibitem{berger1984adaptive}
+Berger, M.J., Oliger, J.: Adaptive mesh refinement for hyperbolic partial differential equations. J. Comput. Phys. \textbf{53}(3), 484--512 (1984)
+
+\bibitem{lu2021deepxde}
+Lu, L., Meng, X., Mao, Z., Karniadakis, G.E.: DeepXDE: A deep learning library for solving differential equations. SIAM Rev. \textbf{63}(1), 208--228 (2021)
 
 \end{thebibliography}
 
